@@ -107,7 +107,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Клавиатура с кнопками
         keyboard = [
-            [KeyboardButton("Приветствие  - кнопкой")],
+            [KeyboardButton("Приветствие  - кнопкой - 2")],
             [KeyboardButton("Расписание на сегодня")],
             [KeyboardButton("Расписание на завтра")],
             [KeyboardButton("Расписание на неделю")],
