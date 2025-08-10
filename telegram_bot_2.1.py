@@ -1,12 +1,19 @@
 import datetime
 import logging
-from telegram import ReplyKeyboardMarkup, KeyboardButton, Update
+from telegram import (
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    Update,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton
+)
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
     ContextTypes,
-    filters
+    filters,
+    CallbackQueryHandler
 )
 import config
 
@@ -42,14 +49,14 @@ def get_schedule_for_date(date):
     return "выходной"
 
 
-# Проверяем, идет ли сейчас прием
-def is_work_time_now():
+# Проверяем, идет ли сейчас прием и возвращаем оставшееся время
+def get_work_status():
     now = datetime.datetime.now()
     schedule = get_schedule_for_date(now)
 
     # Если выходной - приема нет
     if schedule == "выходной":
-        return False
+        return {"status": False, "remaining": None}
 
     # Парсим время начала и окончания
     start_str, end_str = schedule.split('-')
@@ -65,13 +72,21 @@ def is_work_time_now():
     end_time = parse_time(end_str)
     current_time = now.time()
 
-    return start_time <= current_time < end_time
+    if start_time <= current_time < end_time:
+        # Рассчитываем оставшееся время
+        end_datetime = datetime.datetime.combine(now.date(), end_time)
+        remaining = end_datetime - now
+        hours, remainder = divmod(remaining.seconds, 3600)
+        minutes = remainder // 60
+        return {
+            "status": True,
+            "remaining": f"{hours:02d}:{minutes:02d}"
+        }
+    return {"status": False, "remaining": None}
 
 
 # Форматируем расписание для дня с указанием даты
-def get_formatted_schedule(day_offset=0):
-    target_date = datetime.datetime.now() + datetime.timedelta(days=day_offset)
-
+def format_schedule_for_date(target_date):
     # Русские названия дней недели
     days = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
     day_name = days[target_date.weekday()]
@@ -85,11 +100,29 @@ def get_formatted_schedule(day_offset=0):
     return f"{day_name} ({date_str}): {schedule}"
 
 
-# Генерируем расписание на неделю
-def get_weekly_schedule(start_offset=0, days_count=7):
+# Генерируем расписание на текущую неделю, начиная с текущего дня
+def get_current_week_schedule():
+    today = datetime.date.today()
     schedule_lines = []
-    for i in range(start_offset, start_offset + days_count):
-        schedule_lines.append(get_formatted_schedule(i))
+
+    # Добавляем дни от сегодня до конца недели (воскресенья)
+    for i in range(7 - today.weekday()):
+        current_date = today + datetime.timedelta(days=i)
+        schedule_lines.append(format_schedule_for_date(current_date))
+
+    return "\n".join(schedule_lines)
+
+
+# Генерируем расписание на следующую неделю
+def get_next_week_schedule():
+    today = datetime.date.today()
+    # Находим следующий понедельник
+    next_monday = today + datetime.timedelta(days=(7 - today.weekday()))
+
+    schedule_lines = []
+    for i in range(7):
+        current_date = next_monday + datetime.timedelta(days=i)
+        schedule_lines.append(format_schedule_for_date(current_date))
     return "\n".join(schedule_lines)
 
 
@@ -111,7 +144,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [KeyboardButton("Расписание на сегодня")],
             [KeyboardButton("Расписание на завтра")],
             [KeyboardButton("Расписание на неделю")],
-            [KeyboardButton("Расписание на следующую неделю")]  # Новая кнопка
+            [KeyboardButton("Расписание на следующую неделю")]
         ]
 
         reply_markup = ReplyKeyboardMarkup(
@@ -131,6 +164,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Ошибка в start: {e}")
 
 
+# Обработчик кнопки "Позвонить"
+async def call_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    # Исправленная ссылка для звонка через Telegram
+    phone_number = "+79277985185"
+    call_link = f"tg://call?phone={phone_number}"  # Изменено с tel: на tg://call?phone=
+
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🕺 Нажмите для звонка", url=call_link)
+    ]])
+
+    await query.edit_message_text(
+        text="Телефонный звонок инициирован:\n+7 (927) 798-51-85",
+        reply_markup=keyboard
+    )
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         logger.info(f"Получено сообщение: {update.message.text}")
@@ -145,34 +197,57 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if text == "Расписание на сегодня":
             logger.info("Обработка 'Расписание на сегодня'")
 
-            # Проверяем, идет ли сейчас прием
-            if is_work_time_now():
-                status_msg = "❌ Идет прием"
+            # Получаем расписание на сегодня
+            today = datetime.datetime.now()
+            schedule_msg = format_schedule_for_date(today)
+
+            # Проверяем статус работы
+            work_status = get_work_status()
+
+            # Формируем сообщение в зависимости от статуса
+            if work_status["status"]:
+                # Идет прием - добавляем информацию об оставшемся времени
+                message = (
+                    f"❌ Сейчас идет прием\n"
+                    f"До конца приема: {work_status['remaining']}\n\n"
+                    f"{schedule_msg}"
+                )
+                await update.message.reply_text(message)
             else:
-                status_msg = "✅ Приема нет, можно позвонить"
+                # Приема нет - добавляем кнопку звонка (включая выходные)
+                # Определяем тип сообщения для выходных/рабочих дней
+                schedule = get_schedule_for_date(today)
+                status_msg = "✅ Сейчас можно позвонить"
 
-            # Получаем расписание на сегодня с датой
-            schedule_msg = get_formatted_schedule(0)
+                if schedule == "выходной":
+                    status_msg = "ℹ️ Сегодня:"
 
-            # Формируем полное сообщение
-            full_msg = f"{status_msg}\n\nРасписание на сегодня:\n{schedule_msg}"
-            await update.message.reply_text(full_msg)
+                message = (
+                    f"{status_msg}\n\n"
+                    f"{schedule_msg}"
+                )
+                keyboard = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("📞 Позвонить", callback_data="call")
+                ]])
+                await update.message.reply_text(
+                    message,
+                    reply_markup=keyboard
+                )
 
         elif text == "Расписание на завтра":
             logger.info("Обработка 'Расписание на завтра'")
-            schedule_msg = get_formatted_schedule(1)
+            tomorrow = datetime.datetime.now() + datetime.timedelta(days=1)
+            schedule_msg = format_schedule_for_date(tomorrow)
             await update.message.reply_text(schedule_msg)
 
         elif text == "Расписание на неделю":
             logger.info("Обработка 'Расписание на неделю'")
-            # Расписание на 7 дней начиная с сегодня
-            weekly_schedule = get_weekly_schedule(0, 7)
+            weekly_schedule = get_current_week_schedule()
             await update.message.reply_text(weekly_schedule)
 
         elif text == "Расписание на следующую неделю":
             logger.info("Обработка 'Расписание на следующую неделю'")
-            # Расписание на 7 дней начиная со следующего понедельника
-            next_week_schedule = get_weekly_schedule(7, 7)
+            next_week_schedule = get_next_week_schedule()
             await update.message.reply_text(next_week_schedule)
 
         # Обработка команды /start через текстовое сообщение
@@ -191,6 +266,7 @@ def main():
         logger.info("Добавление обработчиков...")
         application.add_handler(CommandHandler("start", start))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        application.add_handler(CallbackQueryHandler(call_button, pattern="^call$"))
 
         logger.info("Запуск polling...")
         application.run_polling()
